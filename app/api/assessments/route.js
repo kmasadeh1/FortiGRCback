@@ -1,19 +1,34 @@
-import { NextResponse } from "next/server";
+import { corsResponse, handleCORSPreflight, CORS_HEADERS } from "@/lib/cors";
 import { authenticateRequest } from "@/lib/authGuard";
-import { corsResponse, handleCORSPreflight } from "@/lib/cors";
+
+// ─── GET /api/assessments ─────────────────────────────────────────────────────
 
 /**
- * GET /api/assessments
+ * Returns all available (Pending) assessments for the authenticated user,
+ * each with its full question list pre-loaded so the frontend can render
+ * without a second fetch.
  *
- * Fetches the first 'Pending' assessment for the current user,
- * along with all related questions from `assessment_questions`.
- *
- * Returns:
+ * Response shape:
  * {
- *   assessment: {
- *     id, title, description, status,
- *     questions: [ { id, text, risk_impact_title, risk_severity, jncsf_capability } ]
- *   }
+ *   assessments: [
+ *     {
+ *       id:             string (UUID),
+ *       title:          string,
+ *       description:    string | null,
+ *       status:         "Pending",
+ *       question_count: number,
+ *       questions: [
+ *         {
+ *           id:                string,
+ *           text:              string,
+ *           risk_impact_title: string,
+ *           risk_severity:     string,
+ *           jncsf_capability:  string
+ *         }
+ *       ]
+ *     }
+ *   ],
+ *   total: number
  * }
  *
  * Requires: Authorization: Bearer <access_token>
@@ -22,18 +37,25 @@ export async function GET(request) {
   try {
     const auth = await authenticateRequest(request);
     if (auth.error) {
-      return corsResponse({ error: "No active session found" }, 401);
+      return corsResponse(
+        { error: "Authentication required. Provide a valid Bearer token." },
+        401
+      );
     }
+
     const { client } = auth;
 
-    // Fetch primary pending assessment with its questions joined
-    const { data: assessment, error: assessmentError } = await client
+    // Fetch all pending assessments with questions in one query.
+    // RLS on the assessments table scopes this to records the user can see.
+    const { data: assessments, error } = await client
       .from("assessments")
-      .select(`
+      .select(
+        `
         id,
         title,
         description,
         status,
+        created_at,
         assessment_questions (
           id,
           text,
@@ -41,42 +63,45 @@ export async function GET(request) {
           risk_severity,
           jncsf_capability
         )
-      `)
+      `
+      )
       .eq("status", "Pending")
-      .order("created_at", { ascending: true })
-      .limit(1)
-      .maybeSingle();
+      .order("created_at", { ascending: true });
 
-    if (assessmentError) {
-      console.error("🔥 Failed to fetch assessment:", assessmentError);
-      return corsResponse({ error: "Failed to fetch assessment.", details: assessmentError.message }, 500);
+    if (error) {
+      console.error("🔥 GET /api/assessments — Supabase error:", error);
+      return corsResponse(
+        { error: "Failed to fetch assessments", details: error.message },
+        500
+      );
     }
 
-    if (!assessment) {
-      return NextResponse.json({ assessment: null, message: "No pending assessments found." }, { status: 200 });
-    }
+    // Normalize the nested key from Supabase's join syntax and add question_count
+    const normalized = (assessments || []).map((a) => ({
+      id: a.id,
+      title: a.title,
+      description: a.description ?? null,
+      status: a.status,
+      created_at: a.created_at,
+      question_count: (a.assessment_questions || []).length,
+      questions: a.assessment_questions || [],
+    }));
 
-    // Normalize nested questions key from Supabase join syntax
-    const response = {
-      assessment: {
-        id: assessment.id,
-        title: assessment.title,
-        description: assessment.description,
-        status: assessment.status,
-        questions: assessment.assessment_questions || [],
-      }
-    };
-
-    return NextResponse.json(response, { status: 200 });
-  } catch (error) {
-    console.error("🔥 BACKEND CRASH ERROR:", error);
-    return corsResponse({ success: false, error: error.message || "Unknown error" }, 500);
+    return new Response(
+      JSON.stringify({ assessments: normalized, total: normalized.length }),
+      { status: 200, headers: CORS_HEADERS }
+    );
+  } catch (err) {
+    console.error("🔥 GET /api/assessments — Unhandled error:", err);
+    return corsResponse(
+      { error: "Internal server error", details: err.message || "Unknown error" },
+      500
+    );
   }
 }
 
-/**
- * OPTIONS /api/assessments
- */
+// ─── OPTIONS /api/assessments ─────────────────────────────────────────────────
+
 export function OPTIONS() {
   return handleCORSPreflight();
 }

@@ -1,94 +1,259 @@
-import { NextResponse } from "next/server";
+import { corsResponse, handleCORSPreflight, CORS_HEADERS } from "@/lib/cors";
 import { authenticateRequest } from "@/lib/authGuard";
 
-// Maximum file size: 10 MB
-const MAX_FILE_SIZE = 10 * 1024 * 1024;
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+/** Maximum allowed file size in bytes (10 MB). */
+const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
+
+/** Supabase Storage bucket name for all evidence files. */
 const BUCKET_NAME = "fortigrc-evidence";
 
 /**
- * POST /api/evidence/upload
+ * Strict server-side MIME type allowlist.
+ * Any type not in this set is rejected with a 400 before the file is uploaded.
+ * The readable label is returned in error messages so the frontend can display it.
+ */
+const ALLOWED_MIME_TYPES = new Map([
+  ["application/pdf",                                                           "PDF"],
+  ["image/jpeg",                                                                "JPEG image"],
+  ["image/jpg",                                                                 "JPEG image"],
+  ["image/png",                                                                 "PNG image"],
+  ["image/webp",                                                                "WebP image"],
+  ["image/gif",                                                                 "GIF image"],
+  ["application/msword",                                                        "Word document (.doc)"],
+  ["application/vnd.openxmlformats-officedocument.wordprocessingml.document",  "Word document (.docx)"],
+  ["application/vnd.ms-excel",                                                  "Excel spreadsheet (.xls)"],
+  ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",        "Excel spreadsheet (.xlsx)"],
+  ["text/plain",                                                                "Plain text file"],
+]);
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Sanitises a filename so it can be stored safely in a URL path.
+ * Replaces anything that is not an alphanumeric character, hyphen,
+ * underscore, or period with an underscore.
  *
- * Handles file uploads for evidence associated with a compliance control.
+ * @param {string} originalName
+ * @returns {string}
+ */
+function sanitizeFileName(originalName) {
+  return originalName.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+/**
+ * Builds the storage path for an evidence file.
+ * Format: controls/<control_id>/<timestamp>-<sanitized_name>
  *
- * Request: multipart/form-data with fields:
- *   - file        (File, required)
- *   - control_id  (string/UUID, required — the linked Compliance Control ID)
+ * @param {string} controlId
+ * @param {string} originalName
+ * @returns {string}
+ */
+function buildStoragePath(controlId, originalName) {
+  const safe = sanitizeFileName(originalName);
+  return `controls/${controlId}/${Date.now()}-${safe}`;
+}
+
+// ─── POST /api/evidence/upload ────────────────────────────────────────────────
+
+/**
+ * Accepts a multipart/form-data file upload and stores it securely in
+ * Supabase Storage, then creates an evidence database record.
+ *
+ * Form fields:
+ *   file        (File, required)        — the file to upload
+ *   control_id  (string/UUID, required) — the compliance control this evidence supports
+ *   title       (string, optional)      — a human-readable label for the evidence document
+ *
+ * Server-side validations (all applied before any upload attempt):
+ *   - `file` must be present and non-empty.
+ *   - File size must not exceed MAX_FILE_SIZE_BYTES (10 MB).
+ *   - MIME type must be in the ALLOWED_MIME_TYPES allowlist.
+ *   - `control_id` must be present and a non-empty string.
+ *
+ * Response (201):
+ * {
+ *   message:      string,
+ *   record: {
+ *     id:           string (UUID),
+ *     control_id:   string,
+ *     file_name:    string,
+ *     file_url:     string  (storage path — use /evidence/[control_id] for signed URL)
+ *     uploaded_by:  string,
+ *     created_at:   string
+ *   },
+ *   download_url: string  (60-second signed URL for immediate use)
+ * }
  *
  * Requires: Authorization: Bearer <access_token>
  */
 export async function POST(request) {
   try {
+    // ── Authenticate ──────────────────────────────────────────────────────────
+
     const auth = await authenticateRequest(request);
-    if (auth.error) return auth.error;
+    if (auth.error) {
+      return corsResponse(
+        { error: "Authentication required. Provide a valid Bearer token." },
+        401
+      );
+    }
+
     const { client, user } = auth;
+
+    // ── Parse multipart form data ─────────────────────────────────────────────
 
     let formData;
     try {
       formData = await request.formData();
     } catch {
-      return NextResponse.json({ error: "Invalid form data. Expected multipart/form-data." }, { status: 400 });
+      return corsResponse(
+        { error: "Invalid request", details: "Expected multipart/form-data." },
+        400
+      );
     }
 
-    const file = formData.get("file");
+    const file       = formData.get("file");
     const control_id = formData.get("control_id");
+    const title      = formData.get("title");
+
+    // ── Server-side validation (all checks before any I/O) ────────────────────
 
     const errors = [];
 
-    if (!file || !(file instanceof File) || file.size === 0) {
-      errors.push("file is required and must not be empty.");
-    } else if (file.size > MAX_FILE_SIZE) {
-      errors.push(`File size exceeds the maximum allowed (${MAX_FILE_SIZE / 1024 / 1024} MB).`);
+    // File presence and emptiness
+    if (!file || !(file instanceof File)) {
+      errors.push("file is required.");
+    } else {
+      if (file.size === 0) {
+        errors.push("The uploaded file is empty.");
+      }
+
+      // Size check
+      if (file.size > MAX_FILE_SIZE_BYTES) {
+        errors.push(
+          `File size (${(file.size / 1024 / 1024).toFixed(2)} MB) exceeds the maximum allowed size of ${MAX_FILE_SIZE_BYTES / 1024 / 1024} MB.`
+        );
+      }
+
+      // MIME type check — strict allowlist enforced server-side
+      const mimeType = (file.type || "").toLowerCase().trim();
+      if (!ALLOWED_MIME_TYPES.has(mimeType)) {
+        const allowed = [...ALLOWED_MIME_TYPES.values()].join(", ");
+        errors.push(
+          `File type "${mimeType || "unknown"}" is not permitted. Allowed types: ${allowed}.`
+        );
+      }
     }
 
+    // control_id validation
     if (!control_id || typeof control_id !== "string" || control_id.trim().length === 0) {
       errors.push("control_id is required and must be a valid UUID string.");
     }
 
     if (errors.length > 0) {
-      return NextResponse.json({ error: "Validation failed", details: errors }, { status: 400 });
+      return corsResponse({ error: "Validation failed", details: errors }, 400);
     }
 
-    // Sanitize file name explicitly to avoid storage conflicts or path injection
-    const fileName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-    const storagePath = `controls/${control_id.trim()}/${Date.now()}-${fileName}`;
+    // ── Upload to Supabase Storage ────────────────────────────────────────────
 
-    const fileBuffer = await file.arrayBuffer();
+    const storagePath = buildStoragePath(control_id.trim(), file.name);
+    const fileBuffer  = await file.arrayBuffer();
 
     const { data: uploadData, error: uploadError } = await client.storage
       .from(BUCKET_NAME)
       .upload(storagePath, fileBuffer, {
-        contentType: file.type || "application/octet-stream",
-        upsert: false,
+        contentType: file.type,
+        upsert:      false,      // never silently overwrite — fail if path exists
       });
 
     if (uploadError) {
-      console.error("Supabase Storage upload error:", uploadError);
-      return NextResponse.json({ error: "File upload failed", details: uploadError.message }, { status: 500 });
+      console.error("🔥 POST /api/evidence/upload — Storage error:", uploadError);
+      return corsResponse(
+        { error: "File upload to storage failed", details: uploadError.message },
+        500
+      );
     }
 
-    // We will save the root storage path so it can be signed later.
-    const file_url = uploadData.path;
+    // ── Insert evidence record into the database ──────────────────────────────
 
     const { data: dbRecord, error: dbError } = await client
       .from("evidence")
       .insert({
-        control_id: control_id.trim(),
-        file_name: file.name,
-        file_url,
-        uploaded_by: user.id
+        control_id:  control_id.trim(),
+        file_name:   file.name,               // original filename preserved for display
+        file_url:    uploadData.path,          // storage path used to generate signed URLs
+        uploaded_by: user.id,
       })
       .select()
-      .single();
+      .maybeSingle();
 
     if (dbError) {
-      console.error("Supabase DB insert error:", dbError);
-      await client.storage.from(BUCKET_NAME).remove([uploadData.path]);
-      return NextResponse.json({ error: "Failed to save evidence record", details: dbError.message }, { status: 500 });
+      console.error("🔥 POST /api/evidence/upload — DB insert error:", dbError);
+
+      // Roll back: remove the orphaned file from storage so the bucket stays clean
+      const { error: cleanupErr } = await client.storage
+        .from(BUCKET_NAME)
+        .remove([uploadData.path]);
+
+      if (cleanupErr) {
+        console.error(
+          "POST /api/evidence/upload — Storage cleanup failed after DB error:",
+          cleanupErr
+        );
+      }
+
+      return corsResponse(
+        { error: "Failed to save evidence record", details: dbError.message },
+        500
+      );
     }
 
-    return NextResponse.json({ message: "Evidence uploaded successfully.", record: dbRecord }, { status: 201 });
+    if (!dbRecord) {
+      return corsResponse(
+        { error: "Failed to save evidence record", details: "No record returned after insert." },
+        500
+      );
+    }
+
+    // ── Generate a short-lived signed URL for immediate use ───────────────────
+    //
+    // The storage bucket is private. We generate a 60-second signed URL so
+    // the caller can immediately open or display the uploaded file.
+    // For subsequent access use GET /api/evidence/[control_id].
+
+    const { data: signedData, error: signError } = await client.storage
+      .from(BUCKET_NAME)
+      .createSignedUrl(uploadData.path, 60);
+
+    const downloadUrl = signError ? null : (signedData?.signedUrl ?? null);
+
+    if (signError) {
+      console.warn("POST /api/evidence/upload — Signed URL generation failed:", signError);
+      // Non-fatal — the record was saved successfully; the caller can still use
+      // GET /api/evidence/[control_id] to retrieve signed URLs later.
+    }
+
+    return new Response(
+      JSON.stringify({
+        message:      "Evidence uploaded and saved successfully.",
+        record:       dbRecord,
+        download_url: downloadUrl,
+      }),
+      { status: 201, headers: CORS_HEADERS }
+    );
   } catch (err) {
-    console.error("Unexpected error in POST /api/evidence/upload:", err);
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+    console.error("🔥 POST /api/evidence/upload — Unhandled error:", err);
+    return corsResponse(
+      { error: "Internal server error", details: err.message || "Unknown error" },
+      500
+    );
   }
+}
+
+// ─── OPTIONS /api/evidence/upload ────────────────────────────────────────────
+
+export function OPTIONS() {
+  return handleCORSPreflight();
 }
