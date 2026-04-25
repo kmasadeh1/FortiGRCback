@@ -1,11 +1,10 @@
 import { NextResponse } from "next/server";
 import { authenticateRequest } from "@/lib/authGuard";
-import { getSupabase } from "@/lib/supabaseClient";
 import { calculateRiskScore } from "@/lib/riskScoring";
 import { corsResponse, handleCORSPreflight, CORS_HEADERS } from "@/lib/cors";
-import { checkRbac } from "@/app/api/utils/rbac";
 
-// Valid values for the jncsf_capability_enum
+// ─── Constants ────────────────────────────────────────────────────────────────
+
 const VALID_CAPABILITIES = [
   "Architecture & Portfolio",
   "Development",
@@ -15,227 +14,336 @@ const VALID_CAPABILITIES = [
   "National Cyber Responsibility",
 ];
 
+const VALID_STATUSES = ["Open", "In Progress", "Mitigated"];
+
+const VALID_SEVERITY_LEVELS = ["Low", "Medium", "High", "Critical"];
+
+// Columns the client is allowed to sort by (whitelist prevents SQL injection)
+const SORTABLE_COLUMNS = [
+  "created_at",
+  "quantitative_score",
+  "severity_level",
+  "title",
+  "status",
+];
+
+// Full column projection returned on every risk object
+const RISK_SELECT_FIELDS = [
+  "id",
+  "title",
+  "description",
+  "jncsf_capability",
+  "likelihood",
+  "impact",
+  "quantitative_score",
+  "severity_level",
+  "status",
+  "created_at",
+].join(", ");
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
 /**
- * GET /api/risks
+ * Strips any columns that must never be sent back to the client
+ * (e.g. internal foreign keys). Keeps the surface clean and predictable.
  *
- * Returns all risks owned by the authenticated user (id and title only),
- * ordered newest-first.
+ * @param {object} risk - Raw row from Supabase
+ * @returns {object}
+ */
+function sanitizeRisk(risk) {
+  // user_id is an internal ownership column — never expose it
+  const { user_id, ...safe } = risk;
+  return safe;
+}
+
+/**
+ * Extracts the client IP from standard proxy headers.
+ * Falls back to "unknown" when neither header is present.
+ *
+ * @param {Request} request
+ * @returns {string}
+ */
+function getClientIp(request) {
+  return (
+    request.headers.get("x-forwarded-for")?.split(",")[0].trim() ||
+    request.headers.get("x-real-ip")?.trim() ||
+    "unknown"
+  );
+}
+
+// ─── GET /api/risks ───────────────────────────────────────────────────────────
+
+/**
+ * Returns all risks owned by the authenticated user.
+ *
+ * Server-side filters (all optional, supplied as query params):
+ *   ?status=Open|In Progress|Mitigated
+ *   ?severity_level=Low|Medium|High|Critical
+ *   ?jncsf_capability=<one of the six JNCSF domains>
+ *
+ * Server-side sorting (optional):
+ *   ?sort_by=created_at|quantitative_score|severity_level|title|status
+ *   ?order=asc|desc   (default: desc)
  *
  * Requires: Authorization: Bearer <access_token>
  */
 export async function GET(request) {
   try {
     const auth = await authenticateRequest(request);
-    
-    // Explicitly check for user session to debug authentication failures natively
     if (auth.error) {
-      return NextResponse.json({ error: "No active session found" }, { status: 401 });
+      return NextResponse.json(
+        { error: "Authentication required. Provide a valid Bearer token." },
+        { status: 401 }
+      );
     }
-    
-    const { client } = auth;
 
-    const { data, error } = await client
-      .from("risks")
-      .select("id, title, quantitative_score, severity_level")
-      .order("created_at", { ascending: false });
+    const { client } = auth;
+    const { searchParams } = new URL(request.url);
+
+    // ── Parse & validate filter params ──────────────────────────────────────
+
+    const filterStatus = searchParams.get("status");
+    const filterSeverity = searchParams.get("severity_level");
+    const filterCapability = searchParams.get("jncsf_capability");
+
+    if (filterStatus && !VALID_STATUSES.includes(filterStatus)) {
+      return corsResponse(
+        {
+          error: "Invalid filter value",
+          details: `status must be one of: ${VALID_STATUSES.join(", ")}.`,
+        },
+        400
+      );
+    }
+
+    if (filterSeverity && !VALID_SEVERITY_LEVELS.includes(filterSeverity)) {
+      return corsResponse(
+        {
+          error: "Invalid filter value",
+          details: `severity_level must be one of: ${VALID_SEVERITY_LEVELS.join(", ")}.`,
+        },
+        400
+      );
+    }
+
+    if (filterCapability && !VALID_CAPABILITIES.includes(filterCapability)) {
+      return corsResponse(
+        {
+          error: "Invalid filter value",
+          details: `jncsf_capability must be one of: ${VALID_CAPABILITIES.join(", ")}.`,
+        },
+        400
+      );
+    }
+
+    // ── Parse & validate sort params ─────────────────────────────────────────
+
+    const rawSortBy = searchParams.get("sort_by") || "created_at";
+    const rawOrder = (searchParams.get("order") || "desc").toLowerCase();
+
+    if (!SORTABLE_COLUMNS.includes(rawSortBy)) {
+      return corsResponse(
+        {
+          error: "Invalid sort column",
+          details: `sort_by must be one of: ${SORTABLE_COLUMNS.join(", ")}.`,
+        },
+        400
+      );
+    }
+
+    if (!["asc", "desc"].includes(rawOrder)) {
+      return corsResponse(
+        { error: "Invalid sort order", details: "order must be 'asc' or 'desc'." },
+        400
+      );
+    }
+
+    // ── Build query ──────────────────────────────────────────────────────────
+
+    let query = client.from("risks").select(RISK_SELECT_FIELDS);
+
+    if (filterStatus) query = query.eq("status", filterStatus);
+    if (filterSeverity) query = query.eq("severity_level", filterSeverity);
+    if (filterCapability) query = query.eq("jncsf_capability", filterCapability);
+
+    query = query.order(rawSortBy, { ascending: rawOrder === "asc" });
+
+    const { data, error } = await query;
 
     if (error) {
+      console.error("🔥 GET /api/risks — Supabase error:", error);
       throw error;
     }
 
-    return new Response(JSON.stringify(data), { status: 200, headers: CORS_HEADERS });
-  } catch (error) {
-    console.error("🔥 BACKEND CRASH ERROR:", error);
-    return corsResponse({ success: false, error: error.message || "Unknown error" }, 500);
+    const sanitized = (data || []).map(sanitizeRisk);
+
+    return new Response(JSON.stringify(sanitized), {
+      status: 200,
+      headers: CORS_HEADERS,
+    });
+  } catch (err) {
+    console.error("🔥 GET /api/risks — Unhandled error:", err);
+    return corsResponse(
+      { error: "Internal server error", details: err.message || "Unknown error" },
+      500
+    );
   }
 }
 
+// ─── POST /api/risks ──────────────────────────────────────────────────────────
+
 /**
- * POST /api/risks
+ * Creates a new risk record.
  *
- * Creates a new risk record explicitly passing likelihood and impact through
- * the risk scoring matrix logic rather than trusting client numbers.
+ * Expected JSON body:
+ * {
+ *   "title":            string  (required, non-empty)
+ *   "description":      string  (optional)
+ *   "jncsf_capability": string  (required, must be a valid JNCSF domain)
+ *   "likelihood":       integer (required, 1–5)
+ *   "impact":           integer (required, 1–5)
+ * }
+ *
+ * Business logic (server-side, never trusted from the client):
+ *   - inherent_risk_score  = likelihood × impact
+ *   - risk_level           = Low / Medium / High / Critical (score matrix)
+ *   - status               = 'Open' (always)
  *
  * Requires: Authorization: Bearer <access_token>
  */
 export async function POST(request) {
   try {
-    // authenticateRequest validates the Bearer JWT via supabase.auth.getUser()
-    // DO NOT use getSession() here — it requires a cookie-based session which
-    // does not exist in a Bearer token flow and will always return null server-side.
     const auth = await authenticateRequest(request);
     if (auth.error) {
-      return NextResponse.json({ error: "No active session found" }, { status: 401 });
-    }
-    const { client } = auth;
-
-    const body = await request.json();
-    const { title, jncsf_capability, likelihood, impact } = body;
-
-    const errors = [];
-
-    if (!title || typeof title !== "string" || title.trim().length === 0) {
-      errors.push("title is required and must be a non-empty string.");
-    }
-
-    if (!jncsf_capability || !VALID_CAPABILITIES.includes(jncsf_capability)) {
-      errors.push(`jncsf_capability is required and must be one of: ${VALID_CAPABILITIES.join(", ")}.`);
-    }
-
-    const { score, severity_level } = calculateRiskScore(likelihood, impact);
-
-    if (isNaN(score)) {
-       errors.push("likelihood and impact must be valid integers between 1 and 5.");
-    } else if (likelihood < 1 || likelihood > 5 || impact < 1 || impact > 5) {
-       errors.push("likelihood and impact must be strictly between 1 and 5.");
-    }
-
-    if (errors.length > 0) {
-      return NextResponse.json({ error: "Validation failed", details: errors }, { status: 400 });
-    }
-
-    const { data, error } = await client
-      .from("risks")
-      .insert({
-        title: title.trim(),
-        jncsf_capability,
-        likelihood,
-        impact,
-        quantitative_score: score,
-        severity_level
-      })
-      .select()
-      .maybeSingle();
-
-    if (error || !data) {
-      console.error("Supabase insert error:", error || "No data returned");
-      return NextResponse.json({ error: "Failed to create risk", details: error?.message || "Unknown error" }, { status: 500 });
-    }
-
-    const ipAddress = request.headers.get("x-forwarded-for")?.split(",")[0].trim() || request.headers.get("x-real-ip")?.trim() || "unknown";
-      
-    const { error: auditError } = await client
-      .from("audit_logs")
-      .insert({
-        user_id: auth.user.id,
-        action: "CREATED_RISK",
-        table_name: "risks",
-        record_id: data.id,
-        ip_address: ipAddress
-      });
-
-    if (auditError) console.error("Audit log insertion failed:", auditError);
-
-    return new Response(JSON.stringify(data), { status: 201, headers: CORS_HEADERS });
-  } catch (error) {
-    console.error("🔥 BACKEND CRASH ERROR:", error);
-    return corsResponse({ success: false, error: error.message || "Unknown error" }, 500);
-  }
-}
-
-/**
- * PUT /api/risks
- *
- * Updates an existing risk record securely intercepting likelihood and impact updates
- * through the risk scoring matrix rather than trusting client numbers.
- */
-export async function PUT(request) {
-  try {
-    const auth = await authenticateRequest(request);
-    if (auth.error) return auth.error;
-    const { client } = auth;
-
-    const hasPermission = await checkRbac(client, auth.user.id, "Risk Manager");
-    if (!hasPermission) {
       return NextResponse.json(
-        { error: "Access Denied: You do not have the required permissions (Admin/Risk Manager)." },
-        { status: 403 }
+        { error: "Authentication required. Provide a valid Bearer token." },
+        { status: 401 }
       );
     }
 
-    const body = await request.json();
-    const { id, title, jncsf_capability, likelihood, impact } = body;
+    const { client, user } = auth;
 
-    if (!id || typeof id !== "string") {
-      return NextResponse.json({ error: "Validation failed", details: ["id is required to update a risk."] }, { status: 400 });
+    // ── Parse body ───────────────────────────────────────────────────────────
+
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return corsResponse(
+        { error: "Invalid request body", details: "Request body must be valid JSON." },
+        400
+      );
     }
 
-    const updates = {};
-    if (title !== undefined) updates.title = title.trim();
-    if (jncsf_capability !== undefined) {
-      if (!VALID_CAPABILITIES.includes(jncsf_capability)) {
-         return NextResponse.json({ error: "Validation failed", details: [`jncsf_capability must be one of: ${VALID_CAPABILITIES.join(", ")}.`] }, { status: 400 });
-      }
-      updates.jncsf_capability = jncsf_capability;
+    const { title, description, jncsf_capability, likelihood, impact } = body;
+
+    // ── Validate inputs ──────────────────────────────────────────────────────
+
+    const validationErrors = [];
+
+    if (!title || typeof title !== "string" || title.trim().length === 0) {
+      validationErrors.push("title is required and must be a non-empty string.");
+    } else if (title.trim().length > 255) {
+      validationErrors.push("title must not exceed 255 characters.");
     }
 
-    if (likelihood !== undefined || impact !== undefined) {
-       // Fetch existing risk if one of them is missing to calculate the new score safely
-       let finalLikelihood = likelihood;
-       let finalImpact = impact;
-       
-       if (finalLikelihood === undefined || finalImpact === undefined) {
-           const { data: existingRisk, error: fetchErr } = await client.from("risks").select("likelihood, impact").eq("id", id).maybeSingle();
-           if (fetchErr || !existingRisk) return NextResponse.json({ error: "Failed to fetch existing risk to recalculate score." }, { status: 500 });
-           
-           if (finalLikelihood === undefined) finalLikelihood = existingRisk.likelihood;
-           if (finalImpact === undefined) finalImpact = existingRisk.impact;
-       }
-
-       const { score, severity_level } = calculateRiskScore(finalLikelihood, finalImpact);
-
-       if (isNaN(score)) {
-          return NextResponse.json({ error: "Validation failed", details: ["likelihood and impact must be valid integers between 1 and 5."] }, { status: 400 });
-       } else if (finalLikelihood < 1 || finalLikelihood > 5 || finalImpact < 1 || finalImpact > 5) {
-          return NextResponse.json({ error: "Validation failed", details: ["likelihood and impact must be strictly between 1 and 5."] }, { status: 400 });
-       }
-
-       updates.likelihood = finalLikelihood;
-       updates.impact = finalImpact;
-       updates.quantitative_score = score;
-       updates.severity_level = severity_level;
+    if (!jncsf_capability || !VALID_CAPABILITIES.includes(jncsf_capability)) {
+      validationErrors.push(
+        `jncsf_capability is required and must be one of: ${VALID_CAPABILITIES.join(", ")}.`
+      );
     }
 
-    const { data, error } = await client
+    const parsedLikelihood = Number(likelihood);
+    const parsedImpact = Number(impact);
+
+    if (!Number.isInteger(parsedLikelihood) || parsedLikelihood < 1 || parsedLikelihood > 5) {
+      validationErrors.push("likelihood is required and must be an integer between 1 and 5.");
+    }
+
+    if (!Number.isInteger(parsedImpact) || parsedImpact < 1 || parsedImpact > 5) {
+      validationErrors.push("impact is required and must be an integer between 1 and 5.");
+    }
+
+    if (description !== undefined && typeof description !== "string") {
+      validationErrors.push("description must be a string when provided.");
+    }
+
+    if (validationErrors.length > 0) {
+      return corsResponse(
+        { error: "Validation failed", details: validationErrors },
+        400
+      );
+    }
+
+    // ── Business logic: calculate score & risk level server-side ─────────────
+
+    const { score: inherent_risk_score, severity_level: risk_level } =
+      calculateRiskScore(parsedLikelihood, parsedImpact);
+
+    // ── Insert record ────────────────────────────────────────────────────────
+
+    const { data, error: insertError } = await client
       .from("risks")
-      .update(updates)
-      .eq("id", id)
-      .select()
+      .insert({
+        title: title.trim(),
+        description: description?.trim() ?? null,
+        jncsf_capability,
+        likelihood: parsedLikelihood,
+        impact: parsedImpact,
+        quantitative_score: inherent_risk_score, // stored as inherent_risk_score
+        severity_level: risk_level,
+        status: "Open", // always default — never trust client-supplied status on create
+      })
+      .select(RISK_SELECT_FIELDS)
       .maybeSingle();
 
-    if (error) {
-      console.error("Supabase update error:", error);
-      return NextResponse.json({ error: "Failed to update risk", details: error.message }, { status: 500 });
-    }
-    
-    if (!data) {
-      return NextResponse.json({ error: "Risk not found or update failed." }, { status: 404 });
+    if (insertError) {
+      console.error("🔥 POST /api/risks — Supabase insert error:", insertError);
+      return corsResponse(
+        { error: "Failed to create risk", details: insertError.message },
+        500
+      );
     }
 
-    const ipAddress = request.headers.get("x-forwarded-for")?.split(",")[0].trim() || request.headers.get("x-real-ip")?.trim() || "unknown";
-      
-    const { error: auditError } = await client
+    if (!data) {
+      return corsResponse(
+        { error: "Failed to create risk", details: "No record returned after insert." },
+        500
+      );
+    }
+
+    // ── Audit log (non-blocking — failure must not break the response) ────────
+
+    client
       .from("audit_logs")
       .insert({
-        user_id: auth.user.id,
-        action: "UPDATED_RISK",
+        user_id: user.id,
+        action: "CREATED_RISK",
         table_name: "risks",
         record_id: data.id,
-        ip_address: ipAddress
+        ip_address: getClientIp(request),
+      })
+      .then(({ error: auditErr }) => {
+        if (auditErr) console.error("Audit log insertion failed:", auditErr);
       });
 
-    if (auditError) console.error("Audit log insertion failed:", auditError);
-
-    return new Response(JSON.stringify(data), { status: 200, headers: CORS_HEADERS });
-  } catch (error) {
-    console.error("🔥 BACKEND CRASH ERROR:", error);
-    return corsResponse({ success: false, error: error.message || "Unknown error" }, 500);
+    return new Response(JSON.stringify(sanitizeRisk(data)), {
+      status: 201,
+      headers: CORS_HEADERS,
+    });
+  } catch (err) {
+    console.error("🔥 POST /api/risks — Unhandled error:", err);
+    return corsResponse(
+      { error: "Internal server error", details: err.message || "Unknown error" },
+      500
+    );
   }
 }
 
+// ─── OPTIONS /api/risks ───────────────────────────────────────────────────────
+
 /**
- * OPTIONS /api/risks
- * Handles CORS preflight requests sent by the browser before POST/PUT.
+ * Handles CORS preflight requests from the browser before POST.
  */
 export function OPTIONS() {
   return handleCORSPreflight();
