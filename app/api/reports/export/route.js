@@ -1,9 +1,17 @@
 import { NextResponse } from 'next/server';
-import { getSupabase } from '@/lib/supabaseClient';
+import { authenticateRequest } from '@/lib/authGuard';
 
-export async function GET() {
+export async function GET(request) {
   try {
-    const supabase = getSupabase();
+    // Authenticate and get the RLS-scoped client
+    const auth = await authenticateRequest(request);
+    if (auth.error) {
+      return NextResponse.json(
+        { error: 'Authentication required. Provide a valid Bearer token.' },
+        { status: 401 }
+      );
+    }
+    const { client: supabase } = auth;
 
     // 1. Fetch all risks
     const { data: risks, error: risksError } = await supabase
