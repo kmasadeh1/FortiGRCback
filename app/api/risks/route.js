@@ -90,12 +90,9 @@ function getClientIp(request) {
 export async function GET(request) {
   try {
     const auth = await authenticateRequest(request);
-    if (auth.error) {
-      return NextResponse.json(
-        { error: "Authentication required. Provide a valid Bearer token." },
-        { status: 401 }
-      );
-    }
+    // auth.error is already a fully-formed NextResponse (may include MFA_REQUIRED).
+    // Do NOT replace it with a generic message — propagate it as-is.
+    if (auth.error) return auth.error;
 
     const { client } = auth;
     const { searchParams } = new URL(request.url);
@@ -214,12 +211,9 @@ export async function GET(request) {
 export async function POST(request) {
   try {
     const auth = await authenticateRequest(request);
-    if (auth.error) {
-      return NextResponse.json(
-        { error: "Authentication required. Provide a valid Bearer token." },
-        { status: 401 }
-      );
-    }
+    // auth.error is already a fully-formed NextResponse (may include MFA_REQUIRED).
+    // Do NOT replace it with a generic message — propagate it as-is.
+    if (auth.error) return auth.error;
 
     const { client, user } = auth;
 
@@ -285,13 +279,21 @@ export async function POST(request) {
     const { data, error: insertError } = await client
       .from("risks")
       .insert({
+        // Ownership: always set explicitly from the verified auth user so the
+        // row is never left ownerless if the DB default were to miss (e.g. in
+        // a service-role context).  The RLS INSERT policy also checks
+        // auth.uid() = user_id, so this must match the authenticated identity.
+        user_id: user.id,
         title: title.trim(),
         description: description?.trim() ?? null,
         jncsf_capability,
         likelihood: parsedLikelihood,
         impact: parsedImpact,
-        quantitative_score: inherent_risk_score, // stored as inherent_risk_score
+        quantitative_score: inherent_risk_score,
         severity_level: risk_level,
+        // 'Manual' distinguishes user-created risks from any previously
+        // ingested ones (migration 008 added the source column with this default).
+        source: "Manual",
         status: "Open", // always default — never trust client-supplied status on create
       })
       .select(RISK_SELECT_FIELDS)

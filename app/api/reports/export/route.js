@@ -1,16 +1,13 @@
 import { NextResponse } from 'next/server';
 import { authenticateRequest } from '@/lib/authGuard';
+import { corsResponse, handleCORSPreflight, CORS_HEADERS } from '@/lib/cors';
 
 export async function GET(request) {
   try {
-    // Authenticate and get the RLS-scoped client
+    // auth.error is a fully-formed NextResponse — propagate it as-is so
+    // MFA_REQUIRED and other structured errors reach the client unchanged.
     const auth = await authenticateRequest(request);
-    if (auth.error) {
-      return NextResponse.json(
-        { error: 'Authentication required. Provide a valid Bearer token.' },
-        { status: 401 }
-      );
-    }
+    if (auth.error) return auth.error;
     const { client: supabase } = auth;
 
     // 1. Fetch all risks
@@ -19,7 +16,18 @@ export async function GET(request) {
       .select('id, title, quantitative_score');
 
     if (risksError) {
-      throw new Error(`Failed to fetch risks: ${risksError.message}`);
+      // Log the full Supabase error object — .message alone hides the
+      // PostgREST error code, hint, and details that reveal the real cause.
+      console.error('Export Crash — risks query failed:', {
+        message: risksError.message,
+        code:    risksError.code,
+        details: risksError.details,
+        hint:    risksError.hint,
+      });
+      return corsResponse(
+        { error: 'Failed to fetch risks', details: risksError.message },
+        500
+      );
     }
 
     // 2. Fetch all compliance controls
@@ -28,7 +36,16 @@ export async function GET(request) {
       .select('id, risk_id, control_name, is_compliant');
 
     if (controlsError) {
-      throw new Error(`Failed to fetch compliance controls: ${controlsError.message}`);
+      console.error('Export Crash — controls query failed:', {
+        message: controlsError.message,
+        code:    controlsError.code,
+        details: controlsError.details,
+        hint:    controlsError.hint,
+      });
+      return corsResponse(
+        { error: 'Failed to fetch compliance controls', details: controlsError.message },
+        500
+      );
     }
 
     // 3. Prepare CSV Headers
@@ -92,17 +109,29 @@ export async function GET(request) {
 
     const csvData = csvRows.join('\n');
 
-    // 5. Return as a downloadable CSV
-    return new NextResponse(csvData, {
+    // 5. Return as a downloadable CSV (include CORS headers so cross-origin
+    //    frontends can read the response and trigger the file download)
+    return new Response(csvData, {
       status: 200,
       headers: {
+        ...CORS_HEADERS,
         'Content-Type': 'text/csv',
-        'Content-Disposition': 'attachment; filename="FortiGRC_Audit_Report.csv"'
-      }
+        'Content-Disposition': 'attachment; filename="FortiGRC_Audit_Report.csv"',
+      },
     });
 
   } catch (error) {
-    console.error('API Error /reports/export:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    // Log the complete error object so stack trace and any Supabase fields
+    // are visible in the server console (not just the .message string).
+    console.error('Export Crash — unhandled exception:', error);
+    return corsResponse(
+      { error: error.message || 'Internal server error' },
+      500
+    );
   }
+}
+
+// CORS preflight support for cross-origin requests
+export function OPTIONS() {
+  return handleCORSPreflight();
 }

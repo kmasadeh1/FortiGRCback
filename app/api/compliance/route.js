@@ -89,12 +89,7 @@ function getClientIp(request) {
 export async function GET(request) {
   try {
     const auth = await authenticateRequest(request);
-    if (auth.error) {
-      return corsResponse(
-        { error: "Authentication required. Provide a valid Bearer token." },
-        401
-      );
-    }
+    if (auth.error) return auth.error;
 
     const { client } = auth;
 
@@ -208,12 +203,7 @@ export async function GET(request) {
 export async function POST(request) {
   try {
     const auth = await authenticateRequest(request);
-    if (auth.error) {
-      return corsResponse(
-        { error: "Authentication required. Provide a valid Bearer token." },
-        401
-      );
-    }
+    if (auth.error) return auth.error;
 
     const { client, user } = auth;
 
@@ -276,6 +266,9 @@ export async function POST(request) {
     const { data, error: insertErr } = await client
       .from("compliance_controls")
       .insert({
+        // Ownership: set explicitly from the verified auth user rather than
+        // relying on DEFAULT auth.uid() — mirrors the pattern used in risks POST.
+        user_id: user.id,
         risk_id: risk_id.trim(),
         control_name: control_name.trim(),
         select_principle,

@@ -10,6 +10,7 @@ const ROLE_HIERARCHY = {
   'admin':       3,
   'risk manager': 2,
   'auditor':     1,
+  'user':        1, // default role assigned at signup — same floor as auditor/viewer
   'viewer':      0,
 };
 

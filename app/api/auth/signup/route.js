@@ -89,6 +89,15 @@ export async function POST(request) {
     const { data, error } = await supabase.auth.signUp({
       email: email.trim(),
       password,
+      options: {
+        // Set a default role in user_metadata so every new user has an
+        // explicit, queryable role from the moment their account is created.
+        // Elevated roles (admin, super_admin) must be granted explicitly by
+        // an administrator — they can never be self-assigned.
+        data: {
+          role: 'user',
+        },
+      },
     });
 
     if (error) {
