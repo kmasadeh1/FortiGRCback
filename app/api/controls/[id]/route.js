@@ -1,4 +1,5 @@
 import { authenticateRequest } from "@/lib/authGuard";
+import { sanitizeTextField } from "@/lib/sanitize";
 import { corsResponse, handleCORSPreflight, CORS_HEADERS } from "@/lib/cors";
 import { checkRbac } from "@/app/api/utils/rbac";
 
@@ -168,7 +169,7 @@ export async function PUT(request, context) {
 
     // ── RBAC guard ────────────────────────────────────────────────────────────
 
-    const hasPermission = await checkRbac(client, user.id, "Risk Manager");
+    const hasPermission = await checkRbac(client, user.id, 'admin');
     if (!hasPermission) {
       return corsResponse(
         {
@@ -273,7 +274,7 @@ export async function PUT(request, context) {
 
     const updates = {};
 
-    if (control_name !== undefined) updates.control_name = control_name.trim();
+    if (control_name !== undefined) updates.control_name = sanitizeTextField(control_name);
     if (select_principle !== undefined) updates.select_principle = select_principle;
     if (risk_id !== undefined) updates.risk_id = risk_id.trim();
     if (jncf_mapping_id !== undefined) {
@@ -431,7 +432,7 @@ export async function DELETE(request, context) {
 
     const { client, user } = auth;
 
-    const hasPermission = await checkRbac(client, user.id, "Risk Manager");
+    const hasPermission = await checkRbac(client, user.id, 'admin');
     if (!hasPermission) {
       return corsResponse(
         {

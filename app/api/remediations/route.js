@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 import { authenticateRequest } from "@/lib/authGuard";
+import { checkRbac } from "@/app/api/utils/rbac";
+import { corsResponse } from "@/lib/cors";
+import { sanitizeTextField } from "@/lib/sanitize";
 
 /**
  * POST /api/remediations
@@ -12,6 +15,9 @@ export async function POST(request) {
     const auth = await authenticateRequest(request);
     if (auth.error) return auth.error;
     const { client, user } = auth;
+
+    const canCreate = await checkRbac(client, user.id, 'admin');
+    if (!canCreate) return corsResponse({ error: 'Access Denied: Only Admins or above can create remediations.' }, 403);
 
     const body = await request.json();
     const { risk_id, assigned_to, due_date, status, notes } = body;
@@ -42,7 +48,7 @@ export async function POST(request) {
         assigned_to: assigned_to.trim(),
         due_date: due_date || null,
         status: status || "Open",
-        notes: notes || ""
+        notes: sanitizeTextField(notes) ?? ""
       })
       .select()
       .single();

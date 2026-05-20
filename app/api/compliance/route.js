@@ -1,4 +1,5 @@
 import { authenticateRequest } from "@/lib/authGuard";
+import { checkRbac } from "@/app/api/utils/rbac";
 import { corsResponse, handleCORSPreflight, CORS_HEADERS } from "@/lib/cors";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -206,6 +207,13 @@ export async function POST(request) {
     if (auth.error) return auth.error;
 
     const { client, user } = auth;
+
+    const canWrite = await checkRbac(client, user.id, 'admin');
+    if (!canWrite) return corsResponse({ error: 'Access Denied: Insufficient permissions.' }, 403);
+
+    // POST always sets is_compliant, so the status-mutation gate always applies here
+    const canMutateStatus = await checkRbac(client, user.id, 'admin');
+    if (!canMutateStatus) return corsResponse({ error: 'Access Denied: Only Admins or above can change compliance status.' }, 403);
 
     // ── Parse body ───────────────────────────────────────────────────────────
 

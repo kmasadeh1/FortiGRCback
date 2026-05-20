@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { authenticateRequest } from "@/lib/authGuard";
+import { checkRbac } from "@/app/api/utils/rbac";
+import { sanitizeTextField } from "@/lib/sanitize";
 import { calculateRiskScore } from "@/lib/riskScoring";
 import { corsResponse, handleCORSPreflight, CORS_HEADERS } from "@/lib/cors";
 
@@ -71,6 +73,19 @@ function getClientIp(request) {
   );
 }
 
+/**
+ * Validates a query parameter string.
+ * Rejects if too long, strips HTML tags.
+ * @param {string|null} val
+ * @param {number} maxLength
+ * @returns {string|null}
+ */
+function sanitizeQueryParam(val, maxLength = 200) {
+  if (!val || typeof val !== 'string') return null;
+  if (val.length > maxLength) return null; // reject oversized inputs silently
+  return val.replace(/<[^>]*>/g, '').trim();
+}
+
 // ─── GET /api/risks ───────────────────────────────────────────────────────────
 
 /**
@@ -99,9 +114,9 @@ export async function GET(request) {
 
     // ── Parse & validate filter params ──────────────────────────────────────
 
-    const filterStatus = searchParams.get("status");
-    const filterSeverity = searchParams.get("severity_level");
-    const filterCapability = searchParams.get("jncsf_capability");
+    const filterStatus = sanitizeQueryParam(searchParams.get("status"));
+    const filterSeverity = sanitizeQueryParam(searchParams.get("severity_level"));
+    const filterCapability = sanitizeQueryParam(searchParams.get("jncsf_capability"));
 
     if (filterStatus && !VALID_STATUSES.includes(filterStatus)) {
       return corsResponse(
@@ -217,6 +232,9 @@ export async function POST(request) {
 
     const { client, user } = auth;
 
+    const canCreate = await checkRbac(client, user.id, 'admin');
+    if (!canCreate) return corsResponse({ error: 'Access Denied: Only Admins or above can create risks.' }, 403);
+
     // ── Parse body ───────────────────────────────────────────────────────────
 
     let body;
@@ -284,8 +302,8 @@ export async function POST(request) {
         // a service-role context).  The RLS INSERT policy also checks
         // auth.uid() = user_id, so this must match the authenticated identity.
         user_id: user.id,
-        title: title.trim(),
-        description: description?.trim() ?? null,
+        title: sanitizeTextField(title),
+        description: sanitizeTextField(description),
         jncsf_capability,
         likelihood: parsedLikelihood,
         impact: parsedImpact,

@@ -6,12 +6,9 @@
  * and 'super_admin' all resolve correctly.
  */
 const ROLE_HIERARCHY = {
-  'super_admin': 4, // highest — full access to everything
-  'admin':       3,
-  'risk manager': 2,
-  'auditor':     1,
-  'user':        1, // default role assigned at signup — same floor as auditor/viewer
-  'viewer':      0,
+  'super_admin': 3,
+  'admin':       2,
+  'user':        1,
 };
 
 /**

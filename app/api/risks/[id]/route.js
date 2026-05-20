@@ -1,4 +1,5 @@
 import { authenticateRequest } from "@/lib/authGuard";
+import { sanitizeTextField } from "@/lib/sanitize";
 import { calculateRiskScore } from "@/lib/riskScoring";
 import { corsResponse, handleCORSPreflight, CORS_HEADERS } from "@/lib/cors";
 import { checkRbac } from "@/app/api/utils/rbac";
@@ -162,12 +163,12 @@ export async function PUT(request, context) {
 
     // ── RBAC: only Risk Manager or Admin may mutate risks ────────────────────
 
-    const hasPermission = await checkRbac(client, user.id, "Risk Manager");
+    const hasPermission = await checkRbac(client, user.id, 'admin');
     if (!hasPermission) {
       return corsResponse(
         {
           error:
-            "Access Denied: You do not have the required permissions (Risk Manager or Admin).",
+            "Access Denied: You do not have the required permissions (Admin or above).",
         },
         403
       );
@@ -247,8 +248,8 @@ export async function PUT(request, context) {
 
     const updates = {};
 
-    if (title !== undefined)            updates.title = title.trim();
-    if (description !== undefined)      updates.description = description.trim() || null;
+    if (title !== undefined)            updates.title = sanitizeTextField(title);
+    if (description !== undefined)      updates.description = sanitizeTextField(description);
     if (jncsf_capability !== undefined) updates.jncsf_capability = jncsf_capability;
     if (status !== undefined)           updates.status = status;
 
@@ -389,12 +390,12 @@ export async function DELETE(request, context) {
 
     // ── RBAC guard ────────────────────────────────────────────────────────────
 
-    const hasPermission = await checkRbac(client, user.id, "Risk Manager");
+    const hasPermission = await checkRbac(client, user.id, 'admin');
     if (!hasPermission) {
       return corsResponse(
         {
           error:
-            "Access Denied: You do not have the required permissions (Risk Manager or Admin).",
+            "Access Denied: You do not have the required permissions (Admin or above).",
         },
         403
       );

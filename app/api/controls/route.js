@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { authenticateRequest } from "@/lib/authGuard";
 import { getSupabase } from "@/lib/supabaseClient";
 import { checkRbac } from "@/app/api/utils/rbac";
+import { sanitizeTextField } from "@/lib/sanitize";
 
 // Valid values for the select_principle_enum
 const VALID_PRINCIPLES = [
@@ -65,7 +66,7 @@ export async function POST(request) {
       .from("compliance_controls")
       .insert({
         risk_id: risk_id.trim(),
-        control_name: control_name.trim(),
+        control_name: sanitizeTextField(control_name),
         select_principle,
         is_compliant,
         jncf_mapping_id: jncf_mapping_id ? jncf_mapping_id.trim() : null
@@ -120,10 +121,10 @@ export async function PUT(request) {
     }
     const { client } = auth;
 
-    const hasPermission = await checkRbac(client, auth.user.id, "Risk Manager");
+    const hasPermission = await checkRbac(client, auth.user.id, 'admin');
     if (!hasPermission) {
       return NextResponse.json(
-        { error: "Access Denied: You do not have the required permissions (Admin/Risk Manager)." },
+        { error: "Access Denied: You do not have the required permissions (Admin or above)." },
         { status: 403 }
       );
     }

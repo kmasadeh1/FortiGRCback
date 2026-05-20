@@ -1,5 +1,8 @@
 import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
+import { checkRbac } from '@/app/api/utils/rbac';
+import { corsResponse } from '@/lib/cors';
+import { sanitizeTextField } from '@/lib/sanitize';
 
 // Helper to init Supabase and check Auth
 async function getAuth(request) {
@@ -40,8 +43,8 @@ export async function POST(request) {
     const { data, error } = await auth.supabase
       .from('incidents')
       .insert([{ 
-        title: body.title, 
-        description: body.description, 
+        title: sanitizeTextField(body.title),
+        description: sanitizeTextField(body.description),
         severity: body.severity, 
         related_risk_id: body.related_risk_id,
         reported_by: auth.user.id 
@@ -59,6 +62,9 @@ export async function PUT(request) {
   try {
     const auth = await getAuth(request);
     if (auth.error) return NextResponse.json({ error: auth.error }, { status: auth.status });
+
+    const canEdit = await checkRbac(auth.supabase, auth.user.id, 'admin');
+    if (!canEdit) return corsResponse({ error: 'Access Denied: Only Admins or above can modify incidents.' }, 403);
 
     const body = await request.json();
     const resolvedAt = body.status === 'Resolved' ? new Date().toISOString() : null;

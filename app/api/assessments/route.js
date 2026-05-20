@@ -1,5 +1,6 @@
 import { corsResponse, handleCORSPreflight, CORS_HEADERS } from "@/lib/cors";
 import { authenticateRequest } from "@/lib/authGuard";
+import { checkRbac } from "@/app/api/utils/rbac";
 
 // ─── GET /api/assessments ─────────────────────────────────────────────────────
 

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { authenticateRequest } from '@/lib/authGuard';
 import { corsResponse, handleCORSPreflight, CORS_HEADERS } from '@/lib/cors';
+import { sanitizeCsvCell } from '@/lib/sanitize';
 
 export async function GET(request) {
   try {
@@ -61,17 +62,6 @@ export async function GET(request) {
     const csvRows = [];
     csvRows.push(headers.join(','));
 
-    // Helper to safely escape CSV values
-    const escapeCsv = (val) => {
-      if (val === null || val === undefined) return '';
-      const strVal = String(val);
-      // Escape double quotes by doubling them, wrap in double quotes if it contains commas, quotes, or newlines
-      if (/[",\n\r]/.test(strVal)) {
-        return `"${strVal.replace(/"/g, '""')}"`;
-      }
-      return strVal;
-    };
-
     // 4. Map the data together (Left Join mapping from Risks to Controls)
     risks.forEach(risk => {
       // Find all controls associated with this risk
@@ -79,9 +69,9 @@ export async function GET(request) {
         c => c.risk_id === risk.id
       );
 
-      const rId = escapeCsv(risk.id);
-      const rTitle = escapeCsv(risk.title);
-      const rScore = escapeCsv(risk.quantitative_score);
+      const rId = sanitizeCsvCell(risk.id);
+      const rTitle = sanitizeCsvCell(risk.title);
+      const rScore = sanitizeCsvCell(risk.quantitative_score);
 
       if (riskControls.length > 0) {
         riskControls.forEach(control => {
@@ -89,8 +79,8 @@ export async function GET(request) {
             rId,
             rTitle,
             rScore,
-            escapeCsv(control.id),
-            escapeCsv(control.control_name),
+            sanitizeCsvCell(control.id),
+            sanitizeCsvCell(control.control_name),
             control.is_compliant ? 'Yes' : 'No'
           ].join(','));
         });

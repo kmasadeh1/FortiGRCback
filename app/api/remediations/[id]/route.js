@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { authenticateRequest } from "@/lib/authGuard";
+import { checkRbac } from "@/app/api/utils/rbac";
+import { corsResponse } from "@/lib/cors";
 
 /**
  * PUT /api/remediations/[id]
@@ -12,6 +14,10 @@ export async function PUT(request, { params }) {
     const auth = await authenticateRequest(request);
     if (auth.error) return auth.error;
     const { client, user } = auth;
+
+    const canEdit = await checkRbac(client, user.id, 'admin');
+    if (!canEdit) return corsResponse({ error: 'Access Denied: Only Admins or above can modify remediations.' }, 403);
+
     const { id } = params;
 
     if (!id) {

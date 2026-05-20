@@ -32,7 +32,7 @@ export async function GET(request) {
 
     const { data, error } = await supabase
       .from("profiles")
-      .select("full_name, avatar_url")
+      .select("full_name, avatar_url, role")
       .eq("id", user.id)
       .maybeSingle();
 

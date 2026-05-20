@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { authenticateRequest } from "@/lib/authGuard";
 import { checkRbac } from "@/app/api/utils/rbac";
 import { corsResponse, handleCORSPreflight, CORS_HEADERS } from "@/lib/cors";
+import { sanitizeTextField } from "@/lib/sanitize";
 
 /**
  * GET /api/risks/exceptions
@@ -69,7 +70,7 @@ export async function POST(request) {
       .from("risk_exceptions")
       .insert({
         risk_id,
-        justification,
+        justification: sanitizeTextField(justification),
         expiration_date,
         status: "Pending",
         requested_by: auth.user.id

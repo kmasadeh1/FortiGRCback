@@ -1,5 +1,6 @@
 import { corsResponse, handleCORSPreflight, CORS_HEADERS } from "@/lib/cors";
 import { authenticateRequest } from "@/lib/authGuard";
+import { checkRbac } from "@/app/api/utils/rbac";
 import { calculateRiskScore } from "@/lib/riskScoring";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -130,6 +131,9 @@ export async function POST(request) {
     }
 
     const { client, user } = auth;
+
+    const canCreate = await checkRbac(client, user.id, 'admin');
+    if (!canCreate) return corsResponse({ error: 'Access Denied: Only Admins or above can submit assessments.' }, 403);
 
     // ── Parse body ────────────────────────────────────────────────────────────
 
