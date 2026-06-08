@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(New-Item -ItemType Directory -Force \"c:\\\\Users\\\\Kareem\\\\Downloads\\\\gradprojback\\\\app\\\\api\\\\profile\\\\role\")",
-      "Bash(Out-Null)"
-    ]
-  }
-}
