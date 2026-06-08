@@ -46,7 +46,7 @@ export async function POST(request) {
     if (auth.error) return auth.error;
     const { client } = auth;
 
-    const hasPermission = await checkRbac(client, auth.user.id, "Auditor");
+    const hasPermission = await checkRbac(client, auth.user.id, "user");
     if (!hasPermission) {
       return NextResponse.json(
         { error: "Access Denied: You do not have the required permissions (Auditor or above)." },
@@ -112,7 +112,7 @@ export async function PUT(request) {
     if (auth.error) return auth.error;
     const { client } = auth;
 
-    const hasPermission = await checkRbac(client, auth.user.id, "Admin");
+    const hasPermission = await checkRbac(client, auth.user.id, "admin");
     if (!hasPermission) {
       return NextResponse.json(
         { error: "Access Denied: You do not have the required permissions (Admin only)." },

@@ -222,6 +222,7 @@ export async function POST(request) {
       const { data: newRisk, error: riskInsertErr } = await client
         .from("risks")
         .insert({
+          user_id:            user.id,
           title:              riskTitle,
           description:        `Auto-generated from assessment: "${title.trim()}". Question failed by user.`,
           jncsf_capability:   resolveCapability(capability),
@@ -231,8 +232,6 @@ export async function POST(request) {
           severity_level,
           status:             "Open",
           source:             "Assessment",
-          // user_id is intentionally omitted here; the DEFAULT auth.uid() expression
-          // on the column + RLS INSERT policy handles assignment automatically.
         })
         .select()
         .maybeSingle();

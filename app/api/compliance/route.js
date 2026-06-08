@@ -1,6 +1,7 @@
 import { authenticateRequest } from "@/lib/authGuard";
 import { checkRbac } from "@/app/api/utils/rbac";
 import { corsResponse, handleCORSPreflight, CORS_HEADERS } from "@/lib/cors";
+import { sanitizeTextField, neutralizeFormula } from "@/lib/sanitize";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -278,7 +279,7 @@ export async function POST(request) {
         // relying on DEFAULT auth.uid() — mirrors the pattern used in risks POST.
         user_id: user.id,
         risk_id: risk_id.trim(),
-        control_name: control_name.trim(),
+        control_name: neutralizeFormula(sanitizeTextField(control_name)),
         select_principle,
         is_compliant,
         jncf_mapping_id: jncf_mapping_id ? jncf_mapping_id.trim() : null,

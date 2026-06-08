@@ -1,4 +1,6 @@
+import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { createClient as createServerClient } from "@/lib/supabase/server";
 import { authenticateRequest } from "@/lib/authGuard";
 import { checkRbac } from "@/app/api/utils/rbac";
 import { corsResponse, handleCORSPreflight } from "@/lib/cors";
@@ -10,6 +12,10 @@ function getServiceClient() {
     process.env.NEXT_PUBLIC_SUPABASE_URL,
     process.env.SUPABASE_SERVICE_ROLE_KEY
   );
+}
+
+function getAdminClient() {
+  return getServiceClient();
 }
 
 export async function GET(request) {
@@ -34,61 +40,53 @@ export async function GET(request) {
 }
 
 export async function PATCH(request) {
-  const auth = await authenticateRequest(request);
-  if (auth.error) return auth.error;
-
-  const isAdmin = await checkRbac(auth.client, auth.user.id, "admin");
-  if (!isAdmin) return corsResponse({ error: "Forbidden" }, 403);
-
-  let body;
   try {
-    body = await request.json();
-  } catch {
-    return corsResponse({ error: "Invalid JSON payload" }, 400);
+    const supabase = await createServerClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    const { data: profile } = await supabase.from('profiles').select('role').eq('id', user.id).single();
+    if (profile?.role !== 'super_admin') return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+
+    const { userId, role, full_name } = await request.json();
+    const adminClient = getAdminClient();
+
+    const updates = {};
+    if (role !== undefined) updates.role = role;
+    if (full_name !== undefined) updates.full_name = full_name;
+
+    const { error } = await adminClient.from('profiles').update(updates).eq('id', userId);
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+    return NextResponse.json({ success: true }, { status: 200 });
+  } catch (err) {
+    return NextResponse.json({ error: err.message }, { status: 500 });
   }
+}
 
-  const { userId, role } = body;
+export async function DELETE(request) {
+  try {
+    const supabase = await createServerClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  if (!userId || !role) {
-    return corsResponse({ error: "userId and role are required" }, 400);
+    const { data: profile } = await supabase.from('profiles').select('role').eq('id', user.id).single();
+    if (profile?.role !== 'super_admin') return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+
+    const { userId } = await request.json();
+
+    if (userId === user.id) return NextResponse.json({ error: 'Cannot delete your own account' }, { status: 400 });
+
+    const adminClient = getAdminClient();
+
+    // Delete from auth (cascades to profiles)
+    const { error } = await adminClient.auth.admin.deleteUser(userId);
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+    return NextResponse.json({ success: true }, { status: 200 });
+  } catch (err) {
+    return NextResponse.json({ error: err.message }, { status: 500 });
   }
-
-  if (!VALID_ROLES.includes(role)) {
-    return corsResponse(
-      { error: `Invalid role. Must be one of: ${VALID_ROLES.join(", ")}` },
-      400
-    );
-  }
-
-  // Only super_admin can assign admin or super_admin roles
-  if (role === "admin" || role === "super_admin") {
-    const isSuperAdmin = await checkRbac(auth.client, auth.user.id, "super_admin");
-    if (!isSuperAdmin) {
-      return corsResponse(
-        { error: "Only super_admin can assign admin or super_admin roles" },
-        403
-      );
-    }
-  }
-
-  const serviceClient = getServiceClient();
-  const { data, error } = await serviceClient
-    .from("profiles")
-    .update({ role })
-    .eq("id", userId)
-    .select("id, full_name, email, role")
-    .maybeSingle();
-
-  if (error) {
-    console.error("PATCH /api/admin/users error:", error);
-    return corsResponse({ error: error.message }, 500);
-  }
-
-  if (!data) {
-    return corsResponse({ error: "User not found" }, 404);
-  }
-
-  return corsResponse(data, 200);
 }
 
 export function OPTIONS() {

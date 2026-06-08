@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { authenticateRequest } from "@/lib/authGuard";
 import { checkRbac } from "@/app/api/utils/rbac";
-import { sanitizeTextField } from "@/lib/sanitize";
+import { sanitizeTextField, neutralizeFormula } from "@/lib/sanitize";
 import { calculateRiskScore } from "@/lib/riskScoring";
 import { corsResponse, handleCORSPreflight, CORS_HEADERS } from "@/lib/cors";
 
@@ -117,6 +117,7 @@ export async function GET(request) {
     const filterStatus = sanitizeQueryParam(searchParams.get("status"));
     const filterSeverity = sanitizeQueryParam(searchParams.get("severity_level"));
     const filterCapability = sanitizeQueryParam(searchParams.get("jncsf_capability"));
+    const searchTerm = sanitizeQueryParam(searchParams.get("search"), 200);
 
     if (filterStatus && !VALID_STATUSES.includes(filterStatus)) {
       return corsResponse(
@@ -177,6 +178,7 @@ export async function GET(request) {
     if (filterStatus) query = query.eq("status", filterStatus);
     if (filterSeverity) query = query.eq("severity_level", filterSeverity);
     if (filterCapability) query = query.eq("jncsf_capability", filterCapability);
+    if (searchTerm) query = query.ilike("title", `%${searchTerm}%`);
 
     query = query.order(rawSortBy, { ascending: rawOrder === "asc" });
 
@@ -302,8 +304,8 @@ export async function POST(request) {
         // a service-role context).  The RLS INSERT policy also checks
         // auth.uid() = user_id, so this must match the authenticated identity.
         user_id: user.id,
-        title: sanitizeTextField(title),
-        description: sanitizeTextField(description),
+        title: neutralizeFormula(sanitizeTextField(title)),
+        description: neutralizeFormula(sanitizeTextField(description)),
         jncsf_capability,
         likelihood: parsedLikelihood,
         impact: parsedImpact,
